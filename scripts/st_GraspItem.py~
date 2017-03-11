@@ -1,0 +1,204 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+
+#--------------------------------------------------
+##指定されたオブジェクトを探し把持するステートマシン
+#
+#author: Yuta KIYAMA
+#date: 16/03/12
+#--------------------------------------------------
+
+
+import sys
+import roslib
+sys.path.append(roslib.packages.get_pkg_dir('common_pkg') + '/scripts/common')
+
+from common_import import *
+from common_function import *
+
+
+#--------------------------------------------------
+#ステートマシン設計規則
+#--------------------------------------------------
+#ステートを跨ぐデータはパラメータ(/param/以下)に保存する
+
+
+#--------------------------------------------------
+#このファイル内のステートマシンの宣言部分
+#--------------------------------------------------
+class MainState(smach.StateMachine):
+    def __init__(self):
+        smach.StateMachine.__init__(self, outcomes=['exit'])
+        with self:
+        #以降にステートを追加
+            smach.StateMachine.add('GraspItem', GraspItem(),
+                                   transitions = {'exit1':'ARM_Open'})
+            smach.StateMachine.add('ARM_Open', ARM_Open(), 
+                                   transitions = {'exit1':'GoToObj'})
+            smach.StateMachine.add('GoToObj', GoToObj(), 
+                                   transitions = {'exit1':'Img_FindObj'})
+            smach.StateMachine.add('Img_FindObj', Img_FindObj(), 
+                                   transitions = {'exit1':'exit', #TODO:アーム閉じて諦めるステートを記述
+                                                  'exit2':'Img_FindObj',
+                                                  'exit3':'ARM_GraspObj'})
+            smach.StateMachine.add('ARM_GraspObj', ARM_GraspObj(), 
+                                   transitions = {'exit1':'ForARMClose'})
+            smach.StateMachine.add('ForARMClose', ForARMClose(), 
+                                   transitions = {'exit1':'ARM_Close'})
+            smach.StateMachine.add('ARM_Close', ARM_Close(), 
+                                   transitions = {'exit1':'exit'})
+
+
+#--------------------------------------------------
+#--------------------------------------------------
+class GraspItem(smach.State):
+    def __init__(self):
+        smach.State.__init__(self,outcomes=['exit1'])
+
+
+    def execute(self,userdata):
+        #rospy.loginfo(u'ファイル名:'+os.path.basename(__file__)+u'ステート名:'+self.__class__.__name__+u'を実行')
+        return 'exit1'
+
+
+
+#--------------------------------------------------
+#--------------------------------------------------
+class ARM_Open(smach.State):
+    def __init__(self):
+        smach.State.__init__(self, outcomes=['exit1'])
+
+
+    def execute(self, userdata):
+        commonf_dbg_sm_stepin()
+
+        call(['rosrun', 'common_pkg', 'iarm_open.py'])
+                
+        commonf_dbg_sm_stepout()
+        return 'exit1'
+
+
+#--------------------------------------------------
+#--------------------------------------------------
+class GoToObj(smach.State):
+    def __init__(self):
+        smach.State.__init__(self, outcomes=['exit1'])
+
+
+    def execute(self, userdata):
+        commonf_dbg_sm_stepin()
+        
+        call(['rosrun', 'common_pkg', 'approach_table.py'])
+                       
+        commonf_dbg_sm_stepout()
+        return 'exit1'
+
+
+#--------------------------------------------------
+#--------------------------------------------------
+class Img_FindObj(smach.State):
+    def __init__(self):
+        smach.State.__init__(self, outcomes=['exit1', 'exit2', 'exit3'])
+
+
+    def execute(self, userdata):
+        commonf_dbg_sm_stepin()
+
+        i_command=rospy.get_param('/param/command/i_command')
+        command=rospy.get_param('/param/command/detail')[i_command]
+        rospy.set_param('/param/iarm/obj/id', int(command['What']))
+
+        commonf_speech_single('オブジェクトを探します。')
+
+        commonf_actionf_cam_lift(0.435) #0.355
+        commonf_pubf_cam_tilt(0.785) #0.610
+        commonf_pubf_cam_pan(0)
+        
+        #Popen(['rosrun', 'common_pkg', 'img_obj_rec.py'])
+        Popen(['rosrun', 'dev_arm_pkg', 'obj_rec.py'])
+
+        if call(['rosrun', 'common_pkg', 'img_obj_proc']) == 1:
+            if rospy.get_param('/param/iarm/find/try/cnt') >= 2:
+                rospy.set_param('/param/iarm/find/try/cnt', 0)
+
+                commonf_speech_single('オブジェクトが見つかりませんでした。')
+
+                commonf_dbg_sm_stepout()
+                return 'exit1'
+            else:               
+                rospy.set_param('/param/iarm/find/try/cnt', rospy.get_param('/param/iarm/find/try/cnt') + 1)
+
+                commonf_speech_single('３０センチ横に移動します。')
+
+                commonf_pubf_cmd_vel(0, 0.15, 0, 0, 0, 0)
+                commonf_rospy.sleep(2)
+                commonf_pubf_cmd_vel(0, 0, 0, 0, 0, 0)
+
+                commonf_dbg_sm_stepout()                
+                return 'exit2'            
+        else:
+            commonf_node_killer('img_obj_rec')
+
+            rospy.set_param('/param/iarm/find/try/cnt', 0)
+
+            commonf_speech_single('オブジェクトが見つかりました。')
+
+            commonf_dbg_sm_stepout()            
+            return 'exit3'
+
+
+#--------------------------------------------------
+#--------------------------------------------------
+class ARM_GraspObj(smach.State):
+    def __init__(self):
+        smach.State.__init__(self, outcomes=['exit1'])
+
+
+    def execute(self, userdata):
+        commonf_dbg_sm_stepin()
+
+        Popen(['roslaunch', 'common_pkg', 'ar_tracker.launch'])
+
+        call(['rosrun', 'common_pkg', 'iarm_grasp.py'])
+
+        commonf_dbg_sm_stepout()
+        return 'exit1'
+
+
+#--------------------------------------------------
+#--------------------------------------------------
+class ForARMClose(smach.State):
+    def __init__(self):
+        smach.State.__init__(self, outcomes=['exit1'])
+
+
+    def execute(self, userdata):
+        commonf_dbg_sm_stepin()
+
+        commonf_speech_single('45センチ後退。')
+        
+        commonf_pubf_cmd_vel(-0.15, 0, 0, 0, 0, 0)
+        rospy.sleep(3)
+        commonf_pubf_cmd_vel(0, 0, 0, 0, 0, 0)
+        
+        commonf_dbg_sm_stepout()
+        return 'exit1'
+
+
+#--------------------------------------------------
+#--------------------------------------------------
+class ARM_Close(smach.State):
+    def __init__(self):
+        smach.State.__init__(self, outcomes=['exit1'])
+
+
+    def execute(self, userdata):
+        commonf_dbg_sm_stepin()
+        
+        call(['rosrun', 'common_pkg', 'iarm_close.py'])
+                
+        commonf_node_killer('ar_track_alvar')
+
+        commonf_dbg_sm_stepout()
+        return 'exit1'

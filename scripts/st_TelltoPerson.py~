@@ -1,0 +1,55 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+import rospy
+
+import smach
+import smach_ros
+
+import os
+
+#ここから上は必須モジュール
+#ここから下は必要に応じて追加
+
+
+#音声合成を使う#####
+from speech_syn import speech_single #音声合成を現スレッドで起動(喋り終わるまで待つ)
+from speech_syn import speech_multi #音声合成を他スレッドで起動
+####################
+
+
+
+#デバッグモード用、1ステートずつ止めて検証する
+def dbg_sm_statebystate():
+    if rospy.get_param('/param/dbg/sm/statebystate') == 1:
+        raw_input('#####Type enter key to enter next state#####')
+
+#----------ステートマシン設計規則----------
+#ステートを跨ぐデータはパラメータ(/params/以下)に保存する
+
+
+
+#このプログラムのステートマシンの宣言部分
+class MainState(smach.StateMachine):
+    def __init__(self):
+        smach.StateMachine.__init__(self, outcomes=['exit'])
+        with self:
+        #以降にステートを追加
+            smach.StateMachine.add('TelltoPerson',TelltoPerson(),transitions={'exit':'exit'})
+
+
+#質問の答えを教える
+class TelltoPerson(smach.State):
+    def __init__(self):
+        smach.State.__init__(self,outcomes=['exit'])
+
+    def execute(self,userdata):
+        rospy.loginfo(u'ファイル名:'+os.path.basename(__file__)+u'ステート名:'+self.__class__.__name__+u'を実行')
+        dbg_sm_statebystate()
+        
+        #ここに処理を記述
+        answer=rospy.get_param('/param/ans')
+        speech_single(answer)
+
+        return 'exit'
+

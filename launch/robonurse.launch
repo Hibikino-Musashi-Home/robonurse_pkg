@@ -1,0 +1,6 @@
+<!-- -*- mode: XML -*- -->
+
+<launch>
+    <include file="$(find robonurse_pkg)/launch/sm_robonurse.launch"/>
+	<include file="$(find robonurse_pkg)/launch/rviz_robonurse.launch"/>
+</launch>

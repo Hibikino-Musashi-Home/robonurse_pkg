@@ -1,0 +1,86 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+import rospy
+
+import smach
+import smach_ros
+
+import os
+
+#ここから上は必須モジュール
+#ここから下は必要に応じて追加
+
+#音声認識を使う#####
+import actionlib
+
+from dev_smach_pkg.msg import SpeechRecAction
+from dev_smach_pkg.msg import SpeechRecGoal 
+####################
+
+#音声合成を使う#####
+from speech_syn import speech_single #音声合成を現スレッドで起動(喋り終わるまで待つ)
+from speech_syn import speech_multi #音声合成を他スレッドで起動
+####################
+
+
+
+#デバッグモード用、1ステートずつ止めて検証する
+def dbg_sm_statebystate():
+    if rospy.get_param('/param/dbg/sm/statebystate') == 1:
+        raw_input('#####Type enter key to enter next state#####')
+
+#----------ステートマシン設計規則----------
+#ステートを跨ぐデータはパラメータ(/params/以下)に保存する
+
+
+
+#このプログラムのステートマシンの宣言部分
+class MainState(smach.StateMachine):
+    def __init__(self):
+        smach.StateMachine.__init__(self, outcomes=['exit'])
+        with self:
+        #以降にステートを追加
+            smach.StateMachine.add('SRec_AskPerson',SRec_AskPerson(),transitions={'exit':'exit','err_in_speech_rec':'exit'})
+
+
+#質問をして答えを記録する
+class SRec_AskPerson(smach.State):
+    def __init__(self):
+        smach.State.__init__(self,outcomes=['exit','err_in_speech_rec'])
+
+        #音声認識はActionを介して実行
+        self._speech_rec_action_client = actionlib.SimpleActionClient('speech_rec_action', SpeechRecAction) #音声認識のActionClientを生成
+        self._speech_rec_action_client.wait_for_server() #音声認識ノードのActionServerに接続
+        self._feedback = [] #音声認識ノードから返ってくるフィードバック
+
+
+    def execute(self,userdata):
+        rospy.loginfo(u'ファイル名:'+os.path.basename(__file__)+u'ステート名:'+self.__class__.__name__+u'を実行')
+        dbg_sm_statebystate()
+        
+        #ここに処理を記述
+        #現在のステートを音声認識ノードに渡して、音声認識開始
+        goal = SpeechRecGoal() #現在のステートはActionのgoalとして渡される
+        goal.speech_rec_goal = self.__class__.__name__ #現在のステートをgoalに設定
+        self._speech_rec_action_client.send_goal(goal, feedback_cb = self.feedback) #音声認識ノードのActionServerにgoalを送信
+
+        #音声認識ノード終了後
+        self._speech_rec_action_client.wait_for_result() #音声認識ノードのActionServerから終了が返って来るまで待つ
+        if self._speech_rec_action_client.get_result().speech_rec_result == True: #音声認識ノードに現在のステートに対する処理が記述されていた時
+            return 'exit1'
+        else: #音声認識ノードに現在のステートに対する処理が記述されていない時
+            return 'err_in_speech_rec'
+
+    def feedback(self, feedback):
+        self._feedback = feedback
+        #例: feedbackの送受信
+        #音声認識ノードで以下を使って送信       
+        #feedback = SpeechRecFeedback(speech_rec_feedback = ['imte1','item2','item3'])
+        #self._speech_rec_action_server.publish_feedback(feedback)
+        #ステートマシンノードで以下を使って受信
+        #self._feedback.speech_rec_feedback[0]
+        #self._feedback.speech_rec_feedback[1]
+        #self._feedback.speech_rec_feedback[2]
+
+

@@ -1,0 +1,6 @@
+<!-- -*- mode: XML -*- -->
+
+<launch>
+    <include file="$(find navigationtest_pkg)/launch/sm_navigationtest.launch"/>
+	<include file="$(find navigationtest_pkg)/launch/rviz_navigationtest.launch"/>
+</launch>

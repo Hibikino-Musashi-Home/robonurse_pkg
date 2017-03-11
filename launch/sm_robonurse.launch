@@ -1,0 +1,8 @@
+<!-- -*- mode: XML -*- -->
+
+<launch>
+    <node pkg="robonurse_pkg" type="param_robonurse.py" name="params"/>
+    <node pkg="robonurse_pkg" type="speech_rec_robonurse.py" name="speech_rec" output="screen"/>
+    <node pkg="robonurse_pkg" type="sm_robonurse.py" name="sm_robonurse" output="screen"/>
+    <node pkg="smach_viewer" type="smach_viewer.py" name="smach_viewer"/>
+</launch>

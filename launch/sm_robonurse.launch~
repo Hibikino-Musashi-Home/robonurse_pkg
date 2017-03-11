@@ -1,0 +1,8 @@
+<!-- -*- mode: XML -*- -->
+
+<launch>
+    <node pkg="navigationtest_pkg" type="param_navigationtest.py" name="params"/>
+    <node pkg="navigationtest_pkg" type="speech_rec_navigationtest.py" name="speech_rec" output="screen"/>
+    <node pkg="navigationtest_pkg" type="sm_navigationtest.py" name="sm_navigationtest" output="screen"/>
+    <node pkg="smach_viewer" type="smach_viewer.py" name="smach_viewer"/>
+</launch>

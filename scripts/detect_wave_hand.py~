@@ -1,0 +1,375 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+
+#--------------------------------------------------
+#腕を振っている人を検出するプログラム
+#
+#Hibikino-Musashi@Home
+#author: Yuta KIYAMA
+#date: 16/03/14 
+#--------------------------------------------------
+
+
+import sys
+import roslib
+sys.path.append(roslib.packages.get_pkg_dir('common_pkg') + '/scripts/common')
+
+from common_import import *
+from common_function import *
+
+
+#------------------------------------------------
+#定数
+#------------------------------------------------
+#定数の読み込みはglobal宣言なしで問題なし
+
+MAXID = 9 #トラッキングする最大人数
+DISTANCE_THERESHOLD = 4.0 #判定距離
+
+NUM_ANGLE_LOOP_MAX = 200 #400
+
+#フィールドサイズ設定部分
+FIELD_MAX_X = 10
+FIELD_MIN_X = -10
+FIELD_MAX_Y = 10
+FIELD_MIN_Y = -10
+
+HEAD_THRESHOLD = 0.3 #止まっている人と認識する閾値　この値より低いと止まっている人
+ELBOW_THRESHOLD = 0.174 #肘が回転しているかの閾値　この値より高いと肘が回転していると認識
+HAND_THRESHOLD = 0.15 #手先が動いているかの閾値　この値より高いと手先が動いていると認識
+
+WAVE_JUDGE_NUM = 3 #連続何回認識したらプログラムを終了するか
+
+
+#------------------------------------------------
+#グローバル変数
+#------------------------------------------------
+last_head_l_x = 0
+last_head_l_y = 0
+last_elbow_l_pitch = 0
+last_hand_l_z = 0
+last_head_r_x = 0
+last_head_r_y = 0
+last_elbow_r_pitch = 0
+last_hand_r_z = 0
+
+
+#------------------------------------------------
+#------------------------------------------------
+def cal_yaw(translationA, translationB):
+   x1 = translationA[0]
+   y1 = translationA[1]
+   x2 = translationB[0]
+   y2 = translationB[1]
+
+   if x2 - x1 == 0:
+        x2 += 0.00000001 #0による除算を回避するための処置
+   
+   if x2 - x1 >= 0 and y2 - y1 >= 0:
+        return math.atan((y2 - y1) / (x2 - x1))
+   if x2 - x1 <= 0 and y2 - y1 >= 0:
+        return math.atan((y2 - y1) / (x2 - x1)) + math.pi
+   if x2 - x1 <= 0 and y2 - y1 <= 0:
+        return math.atan((y2 - y1) / (x2 - x1)) - math.pi
+   if x2 - x1 >= 0 and y2 - y1 < 0:
+        return math.atan((y2 - y1) / (x2 - x1))
+
+
+#------------------------------------------------
+#頭座標からその人がフィールド内にいるかを判定する関数
+#------------------------------------------------
+def detectPersonInField(tf_head_translation):
+    #判定部分
+    if tf_head_translation[0] <= FIELD_MAX_X and \
+       tf_head_translation[0] >= FIELD_MIN_X and \
+       tf_head_translation[1] <= FIELD_MAX_Y and \
+       tf_head_translation[1] >= FIELD_MIN_Y:
+        return 1 #フィールド内にいる
+    else:
+        return 0 #フィールド内にいない
+
+
+#------------------------------------------------
+#台車を左右に振るスレッド
+#1段階目 台車 前->左
+#2段階目 台車 左->前
+#3段階目 台車 前->右
+#4段階目 台車 右->前 1段階目に戻る
+#------------------------------------------------
+class Move_Thread():
+    def __init__(self):
+        self.stop_event=threading.Event()
+        self.thread=threading.Thread(target=self.target)
+        self.thread.setDaemon(True)
+        self.thread.start()
+
+    def target(self):
+        num_angle_loop = 0
+        while not self.stop_event.is_set():            
+            if num_angle_loop == 0 or num_angle_loop == NUM_ANGLE_LOOP_MAX / 4 * 4:
+                num_angle_loop = 0
+                commonf_pubf_cmd_vel(0, 0, 0, 0, 0, -0.15) #1段階目
+            elif num_angle_loop == NUM_ANGLE_LOOP_MAX / 4 * 1:
+                commonf_pubf_cmd_vel(0, 0, 0, 0, 0, 0.15) #2段階目
+            elif num_angle_loop == NUM_ANGLE_LOOP_MAX / 4 * 2:
+                commonf_pubf_cmd_vel(0, 0, 0, 0, 0, 0.15) #3段階目
+            elif num_angle_loop == NUM_ANGLE_LOOP_MAX / 4 * 3:
+                commonf_pubf_cmd_vel(0, 0, 0, 0, 0, -0.15) #4段階目
+            num_angle_loop += 1
+            rospy.sleep(0.1)
+
+    def stop(self): #停止時処理
+        commonf_pubf_cmd_vel(0, 0, 0, 0, 0, 0)
+        self.stop_event.set()
+        self.thread.join()
+
+
+#------------------------------------------------
+#------------------------------------------------
+def detectWaveHand_L(translation_head, rotation_elbow, translation_hand):
+    global last_head_l_x, last_head_l_y, last_elbow_l_pitch, last_hand_l_z
+
+    euler = euler_from_quaternion([rotation_elbow[0], rotation_elbow[1], rotation_elbow[2], rotation_elbow[3]])
+    
+    rospy.loginfo('Movement of head l x: ' + str(abs(last_head_l_x - translation_head[0])))
+    rospy.loginfo('Movement of head l y: ' + str(abs(last_head_l_y - translation_head[1])))
+    rospy.loginfo('Movement of elbow l pitch: ' + str(abs(last_elbow_l_pitch - euler[1])))
+    rospy.loginfo('Movement of hand l z: ' + str(abs(last_hand_l_z - translation_hand[2])))
+
+    if abs(last_head_l_x - translation_head[0]) < HEAD_THRESHOLD and abs(last_head_l_y - translation_head[1]) < HEAD_THRESHOLD:
+        if abs(last_elbow_l_pitch - euler[1]) > ELBOW_THRESHOLD:
+            if abs(last_hand_l_z - translation_hand[2]) > HAND_THRESHOLD:
+                last_head_l_x = translation_head[0]
+                last_head_l_y = translation_head[1]
+                last_elbow_l_pitch = euler[1]
+                last_hand_l_z = translation_hand[2]
+                return 1
+
+    last_head_l_x = translation_head[0]
+    last_head_l_y = translation_head[1]
+    last_elbow_l_pitch = euler[1]
+    last_hand_l_z = translation_hand[2]
+    return 0
+
+
+#------------------------------------------------
+#------------------------------------------------
+def detectWaveHand_R(translation_head, rotation_elbow, translation_hand):
+    global last_head_r_x, last_head_r_y, last_elbow_r_pitch, last_hand_r_z
+
+    euler = euler_from_quaternion([rotation_elbow[0], rotation_elbow[1], rotation_elbow[2], rotation_elbow[3]])
+    
+    rospy.loginfo('Movement of head r x: ' + str(abs(last_head_r_x - translation_head[0])))
+    rospy.loginfo('Movement of head r y: ' + str(abs(last_head_r_y - translation_head[1])))
+    rospy.loginfo('Movement of elbow r pitch: ' + str(abs(last_elbow_r_pitch - euler[1])))
+    rospy.loginfo('Movement of hand r z: ' + str(abs(last_hand_r_z - translation_hand[2])))
+
+    if abs(last_head_r_x - translation_head[0]) < HEAD_THRESHOLD and abs(last_head_r_y - translation_head[1]) < HEAD_THRESHOLD:
+        if abs(last_elbow_r_pitch - euler[1]) > ELBOW_THRESHOLD:
+            if abs(last_hand_r_z - translation_hand[2]) > HAND_THRESHOLD:
+                last_head_r_x = translation_head[0]
+                last_head_r_y = translation_head[1]
+                last_elbow_r_pitch = euler[1]
+                last_hand_r_z = translation_hand[2]
+                return 1
+
+    last_head_r_x = translation_head[0]
+    last_head_r_y = translation_head[1]
+    last_elbow_r_pitch = euler[1]
+    last_hand_r_z = translation_hand[2]
+    return 0
+
+
+#------------------------------------------------
+#------------------------------------------------
+#def detectWaveHand(translation_head,rotation_elbow,translation_hand):
+#    #首TFの原点座標の分散を求め、閾値より小さい時止まっている人として検出する
+#    sum_x=0
+#    sum_y=0
+#    sum_z=0
+#    sum2_x=0
+#    sum2_y=0
+#    sum2_z=0
+#    for translation in translation_head:
+#        sum_x+=translation[0]
+#        sum_y+=translation[1]
+#        sum_z+=translation[2]
+#        sum2_x+=translation[0]*translation[0]
+#        sum2_y+=translation[1]*translation[1]
+#        sum2_z+=translation[2]*translation[2]
+#    
+#    div_x=sum2_x/REFER_LEN-sum_x/REFER_LEN*sum_x/REFER_LEN
+#    div_y=sum2_y/REFER_LEN-sum_y/REFER_LEN*sum_y/REFER_LEN
+#    div_z=sum2_z/REFER_LEN-sum_z/REFER_LEN*sum_z/REFER_LEN
+#    #rospy.loginfo("head::"+str(div_x+div_y+div_z))
+#
+#    if div_x+div_y+div_z<HEAD_THRESHOLD: #止まっている人がいると判定
+#        #右肘TFのpitch角の分散を求め、閾値より大きい時肘回転として検出。
+#        sum_pitch=0
+#        sum2_pitch=0
+#        for rotation in rotation_elbow:
+#            euler=euler_from_quaternion([rotation[0],rotation[1],rotation[2],rotation[3]])
+#            sum_pitch+=euler[1]
+#            sum2_pitch+=euler[1]*euler[1]
+#
+#        div_pitch=sum2_pitch/REFER_LEN-sum_pitch/REFER_LEN*sum_pitch/REFER_LEN;
+#        #rospy.loginfo("elbow::"+str(div_pitch))
+#
+#        if div_pitch>=ELBOW_THRESHOLD:#肘回転検出
+#            #右手TFの原点座標の分散を求め、閾値より大きい時手の振りとして検出。
+#            sum_x=0
+#            sum_y=0
+#            sum_z=0
+#            sum2_x=0
+#            sum2_y=0
+#            sum2_z=0
+#            div_x=0
+#            div_y=0
+#            div_z=0
+#            for translation in translation_hand: 
+#                sum_x+=translation[0]
+#                sum_y+=translation[1]
+#                sum_z+=translation[2]
+#                sum2_x+=translation[0]*translation[0]
+#                sum2_y+=translation[1]*translation[1]
+#                sum2_z+=translation[2]*translation[2]
+#             
+#            div_x=sum2_x/REFER_LEN-sum_x/REFER_LEN*sum_x/REFER_LEN
+#            div_y=sum2_y/REFER_LEN-sum_y/REFER_LEN*sum_y/REFER_LEN
+#            div_z=sum2_z/REFER_LEN-sum_z/REFER_LEN*sum_z/REFER_LEN
+#            #rospy.loginfo("hand::"+str(div_x+div_y+div_z))
+#
+#            if div_x+div_y+div_z>=HAND_THRESHOLD: #手の移動検出
+#                rospy.loginfo("arm_waving!!!!")
+#                return 1
+#            
+#    return 0
+
+
+#------------------------------------------------
+#------------------------------------------------
+if __name__ == '__main__':    
+    node_name = os.path.basename(__file__)
+    node_name = node_name.split('.')
+    rospy.init_node(node_name[0])
+
+    if rospy.get_param('/param/dbg/sm/flow') == 0 and rospy.get_param('/param/dbg/speech/onlyspeech') == 0:        
+        commonf_speech_single('カメラモード切り替え中。')
+
+        call(['rosnode', 'kill', '/camera/camera_nodelet_manager'])    
+        call(['rosnode', 'kill', '/camera/depth_metric'])
+        call(['rosnode', 'kill', '/camera/depth_metric_rect'])
+        call(['rosnode', 'kill', '/camera/depth_points'])
+        call(['rosnode', 'kill', '/camera/depth_rectify_depth'])
+        call(['rosnode', 'kill', '/camera/depth_registered_rectify_depth'])
+        call(['rosnode', 'kill', '/camera/points_xyzrgb_hw_registered'])
+        call(['rosnode', 'kill', '/camera/rectify_color'])
+        rospy.sleep(5)
+
+        #call(['echo horihori|sudo -S service udev reload'])
+    
+        Popen(['rosrun', 'openni_tracker', 'openni_tracker'])
+        rospy.sleep(5)
+
+
+        commonf_speech_single("手を振ってください。")
+
+
+        tfTrackingId = 0
+
+        judge_wave = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+        th = Move_Thread()
+
+        tf_listener = tf.TransformListener()
+
+        main_rate = rospy.Rate(10)
+        while not rospy.is_shutdown():
+            while not rospy.is_shutdown():
+                if tfTrackingId < MAXID:
+                    tfTrackingId += 1
+                    Name_Tracking_head = "head_"+str(tfTrackingId)
+                    Name_Tracking_elbow_L = "left_elbow_"+str(tfTrackingId)
+                    Name_Tracking_elbow_R = "right_elbow_"+str(tfTrackingId)
+                    Name_Tracking_hand_L = "left_hand_"+str(tfTrackingId)
+                    Name_Tracking_hand_R = "right_hand_"+str(tfTrackingId)
+                else:
+                    tfTrackingId = 0
+                    Name_Tracking_head = "head"
+                    Name_Tracking_elbow_L = "left_elbow"
+                    Name_Tracking_elbow_R = "right_elbow"
+                    Name_Tracking_hand_L = "left_hand"
+                    Name_Tracking_hand_R = "right_hand"
+                
+                try:
+                    (camera2head_translation, camera2head_rotation) = tf_listener.lookupTransform("openni_depth_frame", Name_Tracking_head, rospy.Time(0))
+                    (camera2elbow_l_translation, camera2elbow_l_rotation) = tf_listener.lookupTransform("openni_depth_frame", Name_Tracking_elbow_L, rospy.Time(0))
+                    (camera2elbow_r_translation, camera2elbow_r_rotation) = tf_listener.lookupTransform("openni_depth_frame", Name_Tracking_elbow_R, rospy.Time(0))
+                    (camera2hand_l_translation, camera2hand_l_rotation) = tf_listener.lookupTransform("openni_depth_frame", Name_Tracking_hand_L, rospy.Time(0))
+                    (camera2hand_r_translation, camera2hand_r_rotation) = tf_listener.lookupTransform("openni_depth_frame", Name_Tracking_hand_R, rospy.Time(0))
+                except Exception as e:
+                    #rospy.loginfo('type:'+str(type(e)))
+                    #rospy.loginfo('args:'+str(e.args))
+                    #rospy.loginfo('message:'+e.message)
+                    #rospy.sleep(1)
+                    continue
+                break
+
+
+            if detectPersonInField(camera2head_translation): #フィールド内にいる人か(必ず map x: 0 y: 0 にロボットが居ること)
+                if camera2head_translation[0] <= DISTANCE_THERESHOLD: #判定距離内にいる人か
+                    th.stop()
+                    commonf_pubf_cmd_vel(0, 0, 0, 0, 0, 0)
+
+                    while not rospy.is_shutdown():
+                        try:
+                            (camera2head_translation, camera2head_rotation) = tf_listener.lookupTransform("openni_depth_frame", Name_Tracking_head, rospy.Time(0))
+                            (camera2elbow_l_translation, camera2elbow_l_rotation) = tf_listener.lookupTransform("openni_depth_frame", Name_Tracking_elbow_L, rospy.Time(0))
+                            (camera2elbow_r_translation, camera2elbow_r_rotation) = tf_listener.lookupTransform("openni_depth_frame", Name_Tracking_elbow_R, rospy.Time(0))
+                            (camera2hand_l_translation, camera2hand_l_rotation) = tf_listener.lookupTransform("openni_depth_frame", Name_Tracking_hand_L, rospy.Time(0))
+                            (camera2hand_r_translation, camera2hand_r_rotation) = tf_listener.lookupTransform("openni_depth_frame", Name_Tracking_hand_R, rospy.Time(0))
+                            (map2head_translation, map2head_rotation) = tf_listener.lookupTransform("map", Name_Tracking_head, rospy.Time(0))
+                        except Exception as e:
+                            print 'piyo'
+                            th = Move_Thread()
+                            break
+
+
+                        if detectWaveHand_L(camera2head_translation, camera2elbow_l_rotation, camera2hand_l_translation) or \
+                           detectWaveHand_R(camera2head_translation, camera2elbow_r_rotation, camera2hand_r_translation):
+                            judge_wave[tfTrackingId] += 1
+                        else:
+                            judge_wave[tfTrackingId] = 0
+
+
+                        if judge_wave[tfTrackingId]>=WAVE_JUDGE_NUM:
+                            commonf_speech_single('発見しました。近づきます。')
+
+                            while not rospy.is_shutdown():
+                                try:
+                                    (map2base_translation, map2base_rotation) = tf_listener.lookupTransform("map", "base_link", rospy.Time(0))
+                                except Exception as e:
+                                    continue
+                    
+                                base2head_yaw = cal_yaw(map2base_translation ,map2head_translation)
+                                commonf_actionf_move_base(map2head_translation[0] - 1.5 * math.cos(base2head_yaw),
+                                                          map2head_translation[1] - 1.5 * math.sin(base2head_yaw),
+                                                          base2head_yaw)
+                                commonf_pubf_cmd_vel(0.2, 0, 0, 0, 0, 0)
+                                rospy.sleep(2)
+                                commonf_pubf_cmd_vel(0, 0, 0, 0, 0, 0)
+
+                                commonf_speech_single('カメラモード切り替え中。')        
+
+                                call(['rosnode', 'kill', 'openni_tracker'])
+                                rospy.sleep(2)        
+
+                                #call(['echo horihori|sudo -S service udev reload'])
+
+                                Popen(['roslaunch', 'openni2_launch', 'openni2.launch'])
+                                rospy.sleep(5)
+
+                                sys.exit(0)
+
+                        main_rate.sleep()
